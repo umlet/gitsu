@@ -184,12 +184,12 @@ def main(args):
 
         # ok
         if opt in ["--init", "--INIT"]:
-            C = Conf()
             if opt == "--init":
-                if filex(C.fname):  raise ESys("config file '%s' already exists; use '--INIT' to overwrite" % C.fname_human)
-            C.INIT()
-            pnote("config template written to '%s':" % C.fname_human)
-            C.p()
+                if filex(Conf.fname):  raise ESys("config file '%s' already exists; use '--INIT' to overwrite" % Conf.fname_human)
+            Conf.INIT()
+            pnote("config template written to '%s':" % Conf.fname_human)
+
+            Conf().p()
             print()
             phint("edit config, especially sshkey names!")
 
@@ -248,14 +248,12 @@ def main(args):
 
 
         elif opt in ["--status"]:
-            print()
-            
-            C = Conf()
-
             setup_git = get_setup_git()
             try:
+                C = Conf()
                 setup_repo = C.repo2setup(get_repo())
             except Exception as e:
+                print()
                 print("current git setup:")
                 print("user.name   '%s'" % setup_git.un)
                 print("user.email  '%s'" % setup_git.ue)
@@ -266,6 +264,7 @@ def main(args):
 
 
             # both setups are valid!
+            print()
             print("current git setup:")
             if setup_git.un == setup_repo.un:   pok("user.name   '%s'" % setup_git.un)
             else:                               perror(  "user.name   '%s'" % setup_git.un)
