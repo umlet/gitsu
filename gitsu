@@ -247,7 +247,7 @@ def main(args):
             print(_USAGE)
 
 
-        elif opt in ["--status"]:
+        elif opt in ["--status", "-s"]:
             setup_git = get_setup_git()
             try:
                 C = Conf()
@@ -383,7 +383,7 @@ Usage (first time):
 [> gitsu --clone <profile>]         # prints clone command using temporary GIT_SSH_COMMAND from config profile
 
  > cd <repo>
- > gitsu [--status]                 # checks git vs config setups; prints git config commands if mismatch
+ > gitsu --status|-s                # checks git vs config setups; prints git config commands if mismatch
 
 Other options:
     --conf                          # prints config
