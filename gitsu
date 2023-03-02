@@ -1,0 +1,406 @@
+#!/usr/bin/env python3
+
+# # ADD this to .bashrc:
+#
+# # Define a function to set the PS1 prompt
+# function set_prompt() {
+#   local GIT_EMAIL=$(git config user.email)
+#   local BASENAME=$(basename "$PWD")
+#   PS1="\[$GIT_EMAIL\] \[$BASENAME\] \$ "
+# }
+# # Set the initial PS1 prompt
+# set_prompt
+# # Call the set_prompt function every time the directory changes
+# PROMPT_COMMAND='set_prompt'
+#
+# function cd() { builtin cd "$@"  &&  { gitsu >/dev/null 2>&1  ;  return 0; } }
+
+# # to delete a function:
+# >unset -f <funcname>
+
+
+import os
+import sys
+import subprocess
+import json
+
+
+# ok
+def _get_repo():
+    rc,so,se = exe("git rev-parse --show-toplevel", fail=False)
+    if rc != 0:  return (False, " .. ".join(se))
+    if len(so) != 1:  return (False, "unexpected stdout format of 'git rev-parse'")
+    dname = so[0]
+    return (True, os.path.basename(dname))
+def get_repo():
+    succ,repo = _get_repo()
+    if not succ:  raise ESys("not in a git repo dir")
+    return repo
+# ok
+def _get_branch():
+    rc,so,se = exe("git branch --show-current", fail=False)
+    if rc != 0:  return (False, " .. ".join(se))
+    if len(so) != 1:  return (False, "unexpected stdout format of 'git branch'")
+    branch = so[0]
+    return (True, branch)
+def get_branch():
+    succ,branch = _get_branch()
+    if not succ:  raise ESys(branch)  # is msg here
+    return branch
+
+
+class Conf:
+    instance = None
+    
+    def __new__(cls):
+        if cls.instance == None:
+            cls.instance = super().__new__(cls)
+        return cls.instance
+
+    _D_TEMPLATE = {    
+        "profiles": { 
+                    "githubjoe":  {
+                                "user.name": "Joe",
+                                "user.email": "joe@hotmail.com",
+                                "SSHKEY.NAME": "MACHINE___githubjoe"
+                                },
+                    "__next_profile":   {
+                                "user.name": "__next_name",
+                                "user.email": "__next_email",
+                                "SSHKEY.NAME": "__next_keyname"
+                                }
+                    },
+        "repo2profile": {
+                        "MyRepo": "githubjoe",
+                        "__next_repo": "__next_profile"
+                        }
+        }
+    fname_human = "~/.gitsu.conf"        
+    fname = os.path.expanduser(fname_human)
+
+    @staticmethod
+    def INIT():
+        with open(Conf.fname, "w") as f:
+            json.dump(Conf._D_TEMPLATE, f, indent=4)
+        
+    def __init__(self):
+        if not filex(Conf.fname):  raise ESys("config file '%s' not found; use '--init' to create" % Conf.fname_human)
+        with open(Conf.fname, "r") as f:
+            self.d = json.load(f)
+        # profiles cannot have same name as repos
+        _tmp_set1 = set(self.d["profiles"].keys())
+        _tmp_set2 = set(self.d["repo2profile"].keys())
+        if len(_tmp_set1.intersection(_tmp_set2)) > 0:  raise ESys("duplicate keys between repos/profiles")
+
+    def p(self):
+        print(json.dumps(self.d, indent=4))
+
+    def has_profile(self, profile):  return profile in self.d["profiles"]
+    def has_repo(self, repo):  return repo in self.d["repo2profile"]
+
+    def profile2setup(self, profile, *, repo=None):
+        if not self.has_profile(profile):  raise ESys("profile '%s' not found in '%s'; 'profiles' contains {%s}" % (profile, Conf.fname_human, ", ".join(Conf().d["profiles"].keys())))
+        d = self.d["profiles"][profile]
+        tup = _gitsu_dic2tup(d)
+        return Setup(*tup, repo=repo, profile=profile)
+    def repo2setup(self, repo):
+        if not self.has_repo(repo):  raise ESys("repo '%s' not found in '%s'; 'repo2profile' contains {%s}" % (repo, Conf.fname_human, ", ".join(Conf().d["repo2profile"].keys())))
+        return self.profile2setup(self.d["repo2profile"][repo],  repo=repo)
+
+    def get_str_profiles(self):  return ", ".join( self.d["profiles"].keys() )
+
+
+def _gitsu_dic2tup(d):
+    return d["user.name"], d["user.email"], d["SSHKEY.NAME"]
+class Setup:
+    def __init__(self, un, ue, sn, *, repo=None, profile=None):
+        self.un, self.ue, self.sn = un, ue, sn
+        self.repo = repo
+        self.profile=profile
+
+    def __eq__(self, other):
+        if not isinstance(other, Setup):  return False
+        return self.un == other.un and self.ue == other.ue and self.sn == other.sn
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+class SetupInvalid:
+    def __init__(self, s):
+        self.msg = s
+
+
+def get_setup_git():  # ensures that:  sn=="" <=> core.sshCommand==""
+    un = exe("git config user.name | cat")[0]
+    ue = exe("git config user.email | cat")[0]
+    coresshcommand = exe("git config core.sshCommand | cat")[0]
+    if coresshcommand == "":
+        sn = ""
+    elif ".ssh/" in coresshcommand:
+        i = coresshcommand.find(".ssh/")
+        sn = coresshcommand[i+5:]
+        if sn == "":  raise ESys("invalid core.sshCommand: empty sshkey-name")
+    else:
+        raise ESys("invalid core.sshCommand: '.ssh/' substring not found")        
+    return Setup(un, ue, sn)
+
+def get_setup_config_by_profile(profile, *, repo=None):
+    if profile not in Conf().d["profiles"]:  return SetupInvalid("profile '%s' not found in config; edit 'profiles' in %s" % (profile, Conf.fname_human))  #raise ESys("profile '%s' not found in config")
+    return Setup(Conf().d["profiles"][profile]["user.name"], Conf().d["profiles"][profile]["user.email"], Conf().d["profiles"][profile]["SSHKEY.NAME"], repo=repo, profile=profile)
+
+def get_setup_config_by_repo(repo=None):
+    if repo == None:
+        succ,repo = _get_repo()
+        if not succ:  return SetupInvalid("not in a git repo dir")
+    if repo not in Conf().d["repo2profile"]:  return SetupInvalid("repo '%s' not found in config; edit 'repo2profile' in '%s'" % (repo, Conf.fname_human))
+    return get_setup_config_by_profile(Conf().d["repo2profile"][repo], repo=repo)
+
+def get_sshkeyname_by_profile(profile):
+    setup = get_setup_config_by_profile(profile)
+    return setup.sn
+
+
+
+
+def BLUE(s):    return "\033[94m" + s + "\033[0m"
+def GREEN(s):   return "\033[92m" + s + "\033[0m"
+def RED(s):     return "\033[91m" + s + "\033[0m"
+def YELLOW(s):  return "\033[33m" + s + "\033[0m"
+
+
+def pok(s):    print(GREEN(   "[OK: "       + s  ))
+def pnote(s):  print(YELLOW(  "[NOTE: "     + s  ))
+def pwarn(s):  print(YELLOW(  "[WARNING: "  + s  ))
+def phint(s):  print(BLUE(    "[HINT: "     + s  ))
+def perror(s): print(RED(     "[ERROR: "    + s  ))
+
+
+def main(args):
+    global CONF    
+
+
+    while len(args) > 0:
+        opt = args.pop(0)
+        
+
+        # ok
+        if opt in ["--init", "--INIT"]:
+            C = Conf()
+            if opt == "--init":
+                if filex(C.fname):  raise ESys("config file '%s' already exists; use '--INIT' to overwrite" % C.fname_human)
+            C.INIT()
+            pnote("config template written to '%s':" % C.fname_human)
+            C.p()
+            print()
+            phint("edit config, especially sshkey names!")
+
+
+        # ok
+        elif opt in ["--conf"]:
+            C = Conf()
+            print("config file '%s':" % C.fname_human)
+            C.p()
+
+
+        # ok
+        elif opt in ["--X"]:
+            C = Conf()
+            if filex(C.fname):
+                os.remove(C.fname)
+                print("config file '%s' removed" % C.fname_human)
+            else:
+                pnote("config file '%s' not found; nothing to remove" % C.fname_human)
+
+
+        # ok
+        elif opt in ["--ssh"]:
+            C = Conf()
+            if len(args) == 0 or args[0].startswith("-"):
+                raise ESys("--ssh: 1 argument required: <profile> from {%s}" % C.get_str_profiles())
+            profile = args.pop(0)
+            
+            sn = C.profile2setup(profile).sn
+            if sn == "":  raise ESys("empty sshkey name in profile '%s'" % profile)
+            print("run:")
+            print('ssh-keygen -t rsa -b 4096 -P "" -C "_no_comment_" -f ~/.ssh/%s' % sn)
+
+
+        # ok
+        elif opt in ["--clone"]:
+            C = Conf()
+            if len(args) == 0 or args[0].startswith("-"):
+                 raise ESys("--clone: 1 argument required: <profile> from {%s}" % C.get_str_profiles())
+            profile = args.pop(0)
+
+            sn = C.profile2setup(profile).sn
+            if sn == "":  raise ESys("empty sshkey name in profile '%s'" % profile)
+            
+            fname_human = "~/.ssh/%s" % sn
+            fname = os.path.expanduser(fname_human)
+            if not filex(fname):  raise ESys("ssh key '%s' not found" % fname_human)
+
+            print("config lookup OK; key exists => run with your <URL>:")
+            cmd = 'GIT_SSH_COMMAND="ssh -i ~/.ssh/%s"  git clone <URL>' % sn
+            print(cmd)
+
+
+        elif opt in ["--usage", "--help"]:
+            print(_USAGE)
+
+
+        elif opt in ["--status"]:
+            print()
+            
+            C = Conf()
+
+            setup_git = get_setup_git()
+            try:
+                setup_repo = C.repo2setup(get_repo())
+            except Exception as e:
+                print("current git setup:")
+                print("user.name   '%s'" % setup_git.un)
+                print("user.email  '%s'" % setup_git.ue)
+                print("SSHKEY.NAME '%s'" % setup_git.sn)
+                print("")
+                perror(f"{e}")
+                continue             
+
+
+            # both setups are valid!
+            print("current git setup:")
+            if setup_git.un == setup_repo.un:   pok("user.name   '%s'" % setup_git.un)
+            else:                               perror(  "user.name   '%s'" % setup_git.un)
+            if setup_git.ue == setup_repo.ue:   pok("user.email  '%s'" % setup_git.ue)
+            else:                               perror(  "user.email  '%s'" % setup_git.ue)
+            if setup_git.sn == setup_repo.sn:   pok("SSHKEY.NAME '%s'" % setup_git.sn)
+            else:                               perror(  "SSHKEY.NAME '%s'" % setup_git.sn)
+
+            print("")
+            print("config setup for repo '%s' (profile: '%s'):" % (setup_repo.repo, setup_repo.profile))
+            if setup_git.un == setup_repo.un:   pok("user.name   '%s'" % setup_repo.un)
+            else:                               perror(  "user.name   '%s'" % setup_repo.un)
+            if setup_git.ue == setup_repo.ue:   pok("user.email  '%s'" % setup_repo.ue)
+            else:                               perror(  "user.email  '%s'" % setup_repo.ue)
+            if setup_git.sn == setup_repo.sn:   pok("SSHKEY.NAME '%s'" % setup_repo.sn)
+            else:                               perror(  "SSHKEY.NAME '%s'" % setup_repo.sn)
+
+            if setup_git != setup_repo:
+                print("")
+                perror("current git setup does not match repo config")
+                print()
+                perror("TO ACTIVATE REPO SETUP, RUN:")
+                
+                if setup_git.un != setup_repo.un:
+                    print('git config user.name "%s"' % setup_repo.un)
+                if setup_git.ue != setup_repo.ue:
+                    print('git config user.email "%s"' % setup_repo.ue)
+                if setup_git.sn != setup_repo.sn:
+                    if setup_repo.sn != "":
+                        print('git config core.sshCommand "ssh -i ~/.ssh/%s"' % setup_repo.sn)
+                    else:
+                        print('git config core.sshCommand ""')
+                continue
+
+
+            # case: git setup matches config setup; now check if sshkey file exists
+            print()
+            pok("git setup == config setup")
+
+
+            print()
+            print("checking sshkey..")
+            sn = setup_git.sn
+            if sn == "":
+                pwarn("sshkey file not set; using default ssh command")
+                continue
+            
+            fname_human = "~/.ssh/%s" % sn
+            fname = os.path.expanduser(fname_human)
+            if not filex(fname):
+                perror(  "sshkey file '%s' not found; run 'gitsu --ssh %s'" % (fname_human, setup_repo.profile)  )
+                continue
+            pok("sshkey '%s' exists" % fname_human)
+
+
+
+
+
+
+        elif opt == "--repo":
+            print(get_repo())
+        elif opt == "--branch":
+            print(get_branch())
+
+
+
+
+        else:
+            raise ESys("invalid option '%s'" % opt)
+
+
+
+
+
+
+
+
+
+###############################################################################
+def exe(cmd, *, fail=True, split=True):
+    process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    b_stdout,b_stderr = process.communicate()
+    s_stdout,s_stderr = b_stdout.decode("utf-8"), b_stderr.decode("utf-8")
+    rc = process.returncode
+
+    ret_s,ret_e = s_stdout, s_stderr
+    if split:
+        if s_stdout.endswith('\n'):  s_stdout = s_stdout[:-1]
+        if s_stderr.endswith('\n'):  s_stderr = s_stderr[:-1]
+        ret_s = s_stdout.split('\n')
+        ret_e = s_stderr.split('\n')
+
+    if fail == False:  # return tuple
+        return rc, ret_s, ret_e
+
+    # fail upon error!
+    if rc != 0:  raise ESys(s_stderr)
+    # or just return stdout        
+    return ret_s
+
+
+def filex(s):   return os.path.isfile(s)
+
+
+
+
+_USAGE="""gitsu manages git setups by repo (name, email, ssh-key).
+
+Usage (first time):
+
+ > gitsu --init                     # creates config file from template (if it does not exist)
+   (..edit config and keyname..)
+ > gitsu --ssh <profile>            # (&exe) shows ssh-keygen command from config profile
+   (..copy pub key to server..)
+
+[> gitsu --clone <profile>]         # prints clone command using temporary GIT_SSH_COMMAND from config profile
+
+ > cd <repo>
+ > gitsu [--status]                 # checks git vs config setups; prints git config commands if mismatch
+
+Other options:
+    --conf                          # prints config
+    --INIT/--X                      # resets/deletes config
+    --repo/--branch                 # prints current repo/branch
+    --prompt                        # creates PS1 prompt string
+  
+"""
+class ESys(Exception):  pass
+class ESysInt(Exception):  pass
+if __name__ == "__main__":
+    from signal import signal, SIGPIPE, SIG_DFL;  signal(SIGPIPE, SIG_DFL)
+
+    pname = sys.argv.pop(0)
+    #if len(sys.argv) == 0:  print(_USAGE, file=sys.stderr);  sys.exit(2)
+    if len(sys.argv) == 0:  sys.argv.extend(["--usage"])
+    try:  main(sys.argv)
+    except ESys as e:     print(RED("[ERROR: "          + os.path.basename(pname) + ": %s" % e), file=sys.stderr);  sys.exit(99)
+    except ESysInt as e:  print(RED("[ERROR_INTERNAL: " + os.path.basename(pname) + ": %s" % e), file=sys.stderr);  sys.exit(199)
